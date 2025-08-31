@@ -15,7 +15,7 @@ from models import get_model
 from utils import *
 from tqdm import tqdm
 
-################################################################## ARGUMENT PARSING
+################################################################# ARGUMENT PARSING
 
 parser = argparse.ArgumentParser(description="PyTorch CIFAR10 Training")
 parser.add_argument(
