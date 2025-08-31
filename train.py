@@ -26,7 +26,7 @@ parser.add_argument("--checkpoint", default=None, type=str)
 parser.add_argument("--n_gpus", default=0, type=int, help="Number of GPUs to use")
 
 ### training specific args
-parser.add_argument("--epochs", default=200, type=int)
+parser.add_argument("--epochs", default=10, type=int)
 parser.add_argument("--lr", default=0.1)
 parser.add_argument(
     "--lr_decay_ratio", default=0.2, type=float, help="learning rate decay"

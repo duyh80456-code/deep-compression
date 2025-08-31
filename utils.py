@@ -119,7 +119,7 @@ def get_error(output, target, topk=(1,)):
 
     res = []
     for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+        correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
         res.append(100.0 - correct_k.mul_(100.0 / batch_size))
     return res
 
@@ -135,31 +135,40 @@ def get_no_params(net, verbose=False, mask=False):
     return tot
 
 
-def train(model, trainloader, criterion, optimizer):
+def train(model, trainloader, criterion, optimizer, print_freq=130):
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
 
-    # switch to train mode
     model.train()
     for i, (input, target) in enumerate(trainloader):
         input, target = input.to(device), target.to(device)
 
-        # compute output
+        # forward
         output = model(input)
         loss = criterion(output, target)
 
-        # measure accuracy and record loss
+        # measure accuracy
         err1, err5 = get_error(output.detach(), target, topk=(1, 5))
-
         losses.update(loss.item(), input.size(0))
         top1.update(err1.item(), input.size(0))
         top5.update(err5.item(), input.size(0))
 
-        # compute gradient and do SGD step
+        # backward
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        # thêm in thông tin tại đây
+        if i % print_freq == 0:
+            lr = optimizer.param_groups[0]["lr"]
+            print(
+                f"[Batch {i}/{len(trainloader)}] "
+                f"Loss {losses.val:.4f} (avg {losses.avg:.4f}) | "
+                f"Top1 Acc {100-top1.val:.2f}% (avg {100-top1.avg:.2f}%) | "
+                f"LR {lr:.6f}"
+            )
+
 
 
 def validate(model, epoch, valloader, criterion, checkpoint=None, seed=None):
@@ -183,16 +192,25 @@ def validate(model, epoch, valloader, criterion, checkpoint=None, seed=None):
         top1.update(err1.item(), input.size(0))
         top5.update(err5.item(), input.size(0))
 
+    # lưu lịch sử error
     error_history.append(top1.avg)
-    if checkpoint:
 
+    # tính accuracy (100 - error)
+    acc = 100.0 - top1.avg
+
+    if checkpoint:
         state = {
             "net": model.state_dict(),
             "masks": [w for name, w in model.named_parameters() if "mask" in name],
             "epoch": epoch,
             "error_history": error_history,
         }
+        os.makedirs("checkpoints", exist_ok=True)
         torch.save(state, f"checkpoints/{checkpoint}_{seed}.t7")
+
+    print(f"[VALIDATE] Loss: {losses.avg:.4f} | Top1 Acc: {acc:.2f}% | Top5 Err: {top5.avg:.2f}%")
+
+    return acc   # 🔥 thêm dòng này
 
 
 def finetune(model, trainloader, criterion, optimizer, steps=100):
@@ -201,10 +219,10 @@ def finetune(model, trainloader, criterion, optimizer, steps=100):
     dataiter = iter(trainloader)
     for i in range(steps):
         try:
-            input, target = dataiter.next()
+            input, target = next(dataiter)
         except StopIteration:
             dataiter = iter(trainloader)
-            input, target = dataiter.next()
+            input, target = next(dataiter)
 
         input, target = input.to(device), target.to(device)
 

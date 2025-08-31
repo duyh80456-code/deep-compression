@@ -49,7 +49,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--prune_iters",
-    default=100,
+    default=10,
     help="how many times to repeat the prune->finetune process",
 )
 parser.add_argument(
@@ -130,6 +130,14 @@ prune_rates = np.linspace(0, args.target_prune_rate, args.prune_iters)
 for prune_rate in tqdm(prune_rates):
     pruner.prune(model, prune_rate)
 
+    # Đếm số tham số còn lại sau khi prune
+    total_params = sum(p.numel() for p in model.parameters())
+    nonzero_params = sum(p.nonzero().size(0) for p in model.parameters())
+    sparsity = 100.0 * (1 - nonzero_params / total_params)
+
+    print(f"\n[INFO] Prune rate: {prune_rate:.2f}%")
+    print(f"[INFO] Remaining params: {nonzero_params}/{total_params} ({100-sparsity:.2f}% kept, {sparsity:.2f}% pruned)")
+
     if prune_rate % args.save_every == 0:
         checkpoint = args.prune_checkpoint + str(prune_rate)
     else:
@@ -138,4 +146,5 @@ for prune_rate in tqdm(prune_rates):
     finetune(model, trainloader, criterion, optimizer, args.finetune_steps)
 
     if checkpoint:
-        validate(model, prune_rate, testloader, criterion, checkpoint=checkpoint)
+        acc = validate(model, prune_rate, testloader, criterion, checkpoint=checkpoint)
+        print(f"[INFO] Accuracy after prune_rate={prune_rate:.2f}% → {acc:.2f}%")

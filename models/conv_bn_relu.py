@@ -12,21 +12,30 @@ class UnstructuredMask:
             padding=padding,
             bias=False,
         )
+        # init mask = ones
         self.mask.weight.data = torch.ones(self.mask.weight.size())
 
     def update(self, new_mask):
         self.mask.weight.data = new_mask
 
     def apply(self, conv, bn=None):
+        # luôn đưa mask về cùng device với conv
+        self.mask = self.mask.to(conv.weight.device)
         conv.weight.data = torch.mul(conv.weight, self.mask.weight)
 
 
 class StructuredMask:
-    def __init__(self, in_planes, planes, kernel_size, stride, padding, bias=None):
-        self.mask = nn.Parameter(torch.ones(planes))
+    def __init__(self, mask):
+        self.mask = mask  # có thể là tensor hoặc Parameter
 
-    def apply(self, conv, bn):
-        conv.weight.data = torch.einsum("cijk,c->cijk", conv.weight.data, self.mask)
+    def apply(self, conv, bn=None):
+        # luôn đưa mask về cùng device với conv
+        self.mask = self.mask.to(conv.weight.device)
+
+        if isinstance(self.mask, torch.Tensor):
+            conv.weight.data = torch.mul(conv.weight, self.mask)
+        else:
+            conv.weight.data = torch.mul(conv.weight, self.mask.weight)
 
 
 class ConvBNReLU(nn.Module):
@@ -52,16 +61,14 @@ class ConvBNReLU(nn.Module):
         )
         self.bn = nn.BatchNorm2d(planes)
 
-        if relu:
-            self.relu = nn.ReLU()
-        else:
-            self.relu = nn.Identity()
+        self.relu = nn.ReLU() if relu else nn.Identity()
 
+        # gắn mask mặc định
         self.mask = UnstructuredMask(
             in_planes, planes, kernel_size, stride, padding, bias
         )
 
     def forward(self, x):
+        # áp dụng mask trước khi conv
         self.mask.apply(self.conv, self.bn)
-
         return self.relu(self.bn(self.conv(x)))
