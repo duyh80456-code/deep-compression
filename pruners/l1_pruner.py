@@ -11,25 +11,44 @@ class PITOOptimizer:
         self.m = m  # number of constraints
         self.n = n  # number of variables
         self.C = C  # regularization parameter
-        self.theta = 0
+        self.theta = 0.0
 
-    def update_theta(self):
-        self.theta += 0.01  # Simple update rule
+    def update_theta(self, a: np.ndarray, S: np.ndarray, k: np.ndarray):
+        """
+        Update theta parameter using formula (from the paper):
+        θ ← (Σⱼ aⱼ Sⱼ / kⱼ - C) / Σⱼ aⱼ / kⱼ
+        """
+        numerator_terms = []
+        denominator_terms = []
+
+        for j in range(len(a)):
+            if k[j] > 0 and a[j] > 0:  # tránh chia cho 0
+                numerator_terms.append(a[j] * S[j] / k[j])
+                denominator_terms.append(a[j] / k[j])
+
+        if len(denominator_terms) > 0 and sum(denominator_terms) > 0:
+            numerator = sum(numerator_terms) - self.C
+            denominator = sum(denominator_terms)
+            self.theta = numerator / denominator
+        else:
+            self.theta = 0.0
 
     def projection_inverse_total_order(self, Y: np.ndarray) -> np.ndarray:
         # Lấy ma trận dấu để khôi phục sau
         sign_matrix = np.sign(Y)
         Y_abs = np.abs(Y)
 
+        # Tổng theo cột
         S = np.sum(Y_abs, axis=0)
+
+        # Hàng đợi ưu tiên (max heap)
         P = []
         for j, s in enumerate(S):
             heapq.heappush(P, (-s, j))
 
-        k = np.ones(self.m, dtype=int) * (self.n + 1)
-        a = np.zeros(self.m)
+        k = np.ones(Y_abs.shape[1], dtype=int) * (Y_abs.shape[0] + 1)
+        a = np.zeros(Y_abs.shape[1])
 
-        theta = 0
         theta_changed = True
         iterations = 0
 
@@ -39,42 +58,38 @@ class PITOOptimizer:
 
             while P:
                 neg_val, j = heapq.heappop(P)
-                top_val = -neg_val
                 i = k[j]
+                k[j] -= 1
 
-                k[j] = k[j] - 1
-
-                if i == self.n + 1:
+                if i == Y_abs.shape[0] + 1:
                     a[j] = 1
-                    self.update_theta()
+                    self.update_theta(a, S, k)
 
                     if np.linalg.norm(Y_abs[:, j]) < self.theta:
                         a[j] = 0
-                        self.update_theta()
+                        self.update_theta(a, S, k)
                         break
 
+                    # sort cột j tăng dần
                     Y_abs[:, j] = np.sort(Y_abs[:, j])
 
                 else:
                     if 0 <= k[j] < Y_abs.shape[0]:
-                        S[j] = S[j] - Y_abs[k[j], j]
+                        S[j] -= Y_abs[k[j], j]
 
-                    self.update_theta()
+                    self.update_theta(a, S, k)
 
-                    if (
-                        k[j] >= 0
-                        and k[j] > 0
-                        and (S[j] - self.theta) / k[j] < Y_abs[min(i, Y_abs.shape[0]-1), j]
-                    ):
-                        k[j] = k[j] + 1
+                    if k[j] > 0 and (S[j] - self.theta) / k[j] < Y_abs[min(i, Y_abs.shape[0]-1), j]:
+                        k[j] += 1
                         if k[j] < Y_abs.shape[0]:
-                            S[j] = S[j] + Y_abs[k[j], j]
-                        self.update_theta()
+                            S[j] += Y_abs[k[j], j]
+                        self.update_theta(a, S, k)
                         break
 
                 if S[j] != 0:
                     heapq.heappush(P, (-S[j], j))
 
+        # Tính X cuối cùng
         X = np.zeros_like(Y_abs)
         for i in range(Y_abs.shape[0]):
             for j in range(Y_abs.shape[1]):
@@ -83,8 +98,7 @@ class PITOOptimizer:
                 else:
                     X[i, j] = max(0, Y_abs[i, j])
 
-        # Khôi phục lại dấu
-        return X * sign_matrix
+        return X * sign_matrix  # khôi phục lại dấu
 
 class L1Pruner:
     def __init__(self, pruning_type="unstructured"):
@@ -102,7 +116,7 @@ class L1Pruner:
                 )
             )
 
-        threshold = np.percentile(channel_norms, prune_rate)
+        threshold = np.percentile([x.cpu().numpy() for c in channel_norms for x in c], prune_rate)
 
         for conv in convs:
             channel_norms = torch.sum(
