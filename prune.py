@@ -128,7 +128,7 @@ for group in optimizer.param_groups:
 prune_rates = np.linspace(0, args.target_prune_rate, args.prune_iters)
 
 for prune_rate in tqdm(prune_rates):
-    pruner.prune(model, prune_rate)
+    pruner.prune_and_optimize(model, prune_rate)
 
     # Đếm số tham số còn lại sau khi prune
     total_params = sum(p.numel() for p in model.parameters())
