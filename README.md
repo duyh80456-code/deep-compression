@@ -6,14 +6,11 @@
 
 A PyTorch implementation of [this paper](https://arxiv.org/abs/1506.02626).
 
-install GPUtil
-```bash
-!pip install GPUtil
-```
+Please install all the packages referred to in the requirements.txt
 
 To run, try:
 ```bash
-!python deep-compression/train.py --model='resnet34' --checkpoint='resnet34' --seed=100 && \
+python deep-compression/train.py --model='resnet34' --checkpoint='resnet34' --seed=100 && \
 python deep-compression/prune.py --model='resnet34' --checkpoint='resnet34' --seed=100
 ```
 
