@@ -1,4 +1,4 @@
-# [Learning both Weights and Connections for Efficient Neural Networks](https://arxiv.org/abs/1506.02626)
+# [Learning both Weights and Connections for Efficient Neural Networks](https://arxiv.org/abs/1506.02626)+[Near-Linear Time Projection onto the l1,∞ Ball; Application to Sparse Autoencoders](https://webcms.i3s.unice.fr/Michel_Barlaud/sites/mbarlaud/files/2023-11/L1Infty_final.pdf)
 
 [![Total alerts](https://img.shields.io/lgtm/alerts/g/jack-willturner/DeepCompression-PyTorch.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/jack-willturner/DeepCompression-PyTorch/alerts/) 
 [![Language grade: Python](https://img.shields.io/lgtm/grade/python/g/jack-willturner/DeepCompression-PyTorch.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/jack-willturner/DeepCompression-PyTorch/context:python)
@@ -6,10 +6,15 @@
 
 A PyTorch implementation of [this paper](https://arxiv.org/abs/1506.02626).
 
+install GPUtil
+```bash
+!pip install GPUtil
+```
+
 To run, try:
 ```bash
-python train.py --model='resnet34' --checkpoint='resnet34'
-python prune.py --model='resnet34' --checkpoint='resnet34'
+!python deep-compression/train.py --model='resnet34' --checkpoint='resnet34' --seed=100 && \
+python deep-compression/prune.py --model='resnet34' --checkpoint='resnet34' --seed=100
 ```
 
 ## Usage 
