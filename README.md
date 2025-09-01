@@ -13,8 +13,21 @@ install GPUtil
 
 To run, try:
 ```bash
-!python deep-compression/train.py --model='resnet34' --checkpoint='resnet34' --seed=100 && \
-python deep-compression/prune.py --model='resnet34' --checkpoint='resnet34' --seed=100
+!python deep-compession/train.py --model='resnet34' --checkpoint='resnet34' --seed=100 && \
+python deep-compession/prune.py --model='resnet34' --checkpoint='resnet34' --seed=100
+```
+
+Change the number of training epochs by changing the default parameter in this line in train.py.
+```bash
+parser.add_argument("--epochs", default=1, type=int)
+```
+So do to prune.py
+```bash
+parser.add_argument(
+    "--prune_iters",
+    default=10,
+    help="how many times to repeat the prune->finetune process",
+)
 ```
 
 ## Usage 
