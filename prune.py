@@ -21,7 +21,7 @@ parser.add_argument(
     default="resnet18",
     help="resnet9, resnet18, resnet34, resnet50, wrn_40_2, wrn_16_2, wrn_40_1",
 )
-parser.add_argument("--data_loc", default="/disk/scratch/datasets/cifar", type=str)
+parser.add_argument("--data_loc", default="./data", type=str)
 parser.add_argument(
     "--checkpoint", default=None, type=str, help="Pretrained model to start from"
 )

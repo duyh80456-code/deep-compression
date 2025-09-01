@@ -21,7 +21,7 @@ parser = argparse.ArgumentParser(description="PyTorch CIFAR10 Training")
 parser.add_argument(
     "--model", default="resnet18", help="resnet9/18/34/50, wrn_40_2/_16_2/_40_1"
 )
-parser.add_argument("--data_loc", default="/disk/scratch/datasets/cifar", type=str)
+parser.add_argument("--data_loc", default="./data", type=str)
 parser.add_argument("--checkpoint", default=None, type=str)
 parser.add_argument("--n_gpus", default=0, type=int, help="Number of GPUs to use")
 
