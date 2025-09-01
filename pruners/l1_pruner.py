@@ -176,16 +176,27 @@ class L1Pruner:
 
         return sparse_matrix, optimized_matrix
 
+
     def prune_and_optimize(self, model, prune_rate, test_data=None):
+        # 1. Prune model
         self.prune(model, prune_rate)
 
+        # 2. Optimize weights bằng PITO
+        sparse_matrix, optimized_matrix = self.sparse_then_pito(model)
+
+        # 3. Nếu có test_data thì optimize cả output
+        optimized_predictions = None
         if test_data is not None:
             model.eval()
             with torch.no_grad():
                 predictions = model(test_data)
                 optimized_predictions = self.apply_pito_to_sparse_matrix(predictions.cpu().numpy())
-                return optimized_predictions
-        return None
+
+        return {
+            "sparse_matrix": sparse_matrix,
+            "optimized_matrix": optimized_matrix,
+            "optimized_predictions": optimized_predictions,
+        }
 
     def prune(self, model, prune_rate):
         if self.pruning_type.lower() == "unstructured":
