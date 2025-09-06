@@ -1,308 +1,313 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List, Dict, Optional
 from sklearn.metrics.pairwise import cosine_similarity
-import heapq
+import copy
 
 
 class L1InftyInftyNorm:
-    """Implementation of L1,∞,∞ norm based on the provided C++ code"""
+    """L1,∞,∞ norm implementation - matches C++ reference exactly"""
 
     @staticmethod
     def norm(y: np.ndarray) -> float:
+        if len(y.shape) == 1:
+            return np.sum(np.abs(y))
+        reshaped = y.reshape(y.shape[0], -1)
+        return np.sum(np.max(np.abs(reshaped), axis=1))
+
+
+class APBProcessor:
+    """Automatic Prune Binarization (APB) processor with optional α, δ parameters"""
+
+    def __init__(self, init_alpha=None, init_delta=None, binary_threshold: float = 0.1, fp_ratio: float = 0.05):
         """
-        Compute L1,∞,∞ norm: sum over first dimension of max over other dimensions
+        init_alpha/init_delta: nếu là số thì dùng trực tiếp, nếu None thì auto theo weight.
+        binary_threshold: fallback threshold khi alpha/delta không khả dụng.
+        fp_ratio: tỉ lệ giữ full-precision (chưa dùng nhiều ở bản alpha/delta, nhưng giữ để tương thích).
         """
-        if len(y.shape) == 2:
-            # For 2D: treat as (d1, d2) where d3=1
-            return np.sum(np.max(np.abs(y), axis=1))
-        elif len(y.shape) == 3:
-            # For 3D: proper L1,∞,∞ norm
-            d1, d2, d3 = y.shape
-            s = 0
-            for i in range(d1):
-                max_v = np.max(np.abs(y[i, :, :]))
-                s += max_v
-            return s
-        else:
-            # Flatten to 2D and compute
-            y_2d = y.reshape(y.shape[0], -1)
-            return np.sum(np.max(np.abs(y_2d), axis=1))
+        self.init_alpha = init_alpha if isinstance(init_alpha, (int, float)) else None
+        self.init_delta = init_delta if isinstance(init_delta, (int, float)) else None
 
-
-class APBOptimizer:
-    """Automatic Prune Binarization (APB) algorithm implementation"""
-
-    def __init__(self, binary_threshold: float = 0.1, fp_ratio: float = 0.05):
         self.binary_threshold = binary_threshold
-        self.fp_ratio = fp_ratio  # Ratio of weights to keep in full precision
+        self.fp_ratio = fp_ratio
 
-    def compute_importance_score(self, weight: torch.Tensor) -> torch.Tensor:
-        """Compute importance score for each weight"""
-        # Use gradient-based importance (simplified version)
-        # In practice, this would use gradients from backpropagation
-        weight_abs = torch.abs(weight)
-        weight_var = torch.var(weight_abs)
-        weight_mean = torch.mean(weight_abs)
+        self.layer_alphas: Dict[int, float] = {}
+        self.layer_deltas: Dict[int, float] = {}
 
-        # Importance score combines magnitude and variance
-        importance = weight_abs * (weight_var + weight_mean)
-        return importance
+    def initialize_layer_parameters(self, weight: torch.Tensor, layer_id: int):
+        if layer_id not in self.layer_alphas:
+            weight_abs = torch.abs(weight)
+            # safe item() to float
+            alpha = self.init_alpha if self.init_alpha is not None else float(torch.mean(weight_abs).item())
+            delta = self.init_delta if self.init_delta is not None else float(3.0 * torch.std(weight_abs).item())
+            self.layer_alphas[layer_id] = alpha
+            self.layer_deltas[layer_id] = delta
 
-    def select_full_precision_weights(self, weight: torch.Tensor,
-                                      importance: torch.Tensor) -> torch.Tensor:
-        """Select which weights to keep in full precision"""
-        flat_importance = importance.flatten()
-        num_fp_weights = int(self.fp_ratio * flat_importance.numel())
+    def apply_apb_to_layer(self, weight: torch.Tensor, layer_id: int) -> torch.Tensor:
+        """Áp dụng APB cho 1 layer"""
+        self.initialize_layer_parameters(weight, layer_id)
 
-        if num_fp_weights == 0:
-            return torch.zeros_like(weight, dtype=torch.bool)
+        alpha = self.layer_alphas.get(layer_id, None)
+        delta = self.layer_deltas.get(layer_id, None)
 
-        # Get top-k important weights
-        _, top_indices = torch.topk(flat_importance, num_fp_weights)
+        # nếu alpha/delta tồn tại, dùng alpha+delta, nếu không, fallback binary_threshold
+        binarization_threshold = (alpha + delta) if (alpha is not None and delta is not None) else self.binary_threshold
 
-        fp_mask = torch.zeros_like(flat_importance, dtype=torch.bool)
-        fp_mask[top_indices] = True
+        weight_magnitude = torch.abs(weight)
+        binarize_mask = weight_magnitude <= binarization_threshold
 
-        return fp_mask.reshape(weight.shape)
+        # Nếu alpha is None (edge), tránh nhân với None
+        alpha_val = alpha if alpha is not None else self.binary_threshold
 
-    def binarize_weights(self, weight: torch.Tensor, fp_mask: torch.Tensor) -> torch.Tensor:
-        """Binarize weights except those marked for full precision"""
-        binary_weight = weight.clone()
-
-        # Binary part: sign of weights not in full precision
-        binary_part = torch.sign(weight) * (1 - fp_mask.float())
-
-        # Full precision part: original weights for selected positions
-        fp_part = weight * fp_mask.float()
+        binary_part = torch.sign(weight) * float(alpha_val) * binarize_mask.float()
+        fp_part = weight * (~binarize_mask).float()
 
         return binary_part + fp_part
 
+    def compute_apb_statistics(self, weight: torch.Tensor, layer_id: int) -> Dict:
+        alpha = self.layer_alphas.get(layer_id, None)
+        delta = self.layer_deltas.get(layer_id, None)
+        threshold = (alpha + delta) if (alpha is not None and delta is not None) else self.binary_threshold
 
-class LayerDistanceCalculator:
-    """Calculate distances between layers for filtering"""
+        weight_magnitude = torch.abs(weight)
+        binarize_mask = weight_magnitude <= threshold
 
-    def __init__(self, distance_threshold: float = 0.95):
-        self.distance_threshold = distance_threshold
-
-    def compute_layer_features(self, weight: torch.Tensor) -> np.ndarray:
-        """Extract features from a layer for distance calculation"""
-        weight_np = weight.detach().cpu().numpy()
-
-        # Flatten weight and compute statistical features
-        flat_weight = weight_np.flatten()
-
-        features = [
-            np.mean(np.abs(flat_weight)),  # Mean absolute value
-            np.std(flat_weight),  # Standard deviation
-            np.percentile(np.abs(flat_weight), 95),  # 95th percentile
-            L1InftyInftyNorm.norm(weight_np),  # L1,∞,∞ norm
-            np.max(np.abs(flat_weight)),  # Max absolute value
-            np.count_nonzero(flat_weight) / len(flat_weight)  # Density
-        ]
-
-        return np.array(features)
-
-    def compute_similarity_matrix(self, layer_features: List[np.ndarray]) -> np.ndarray:
-        """Compute cosine similarity matrix between layers"""
-        feature_matrix = np.stack(layer_features)
-        return cosine_similarity(feature_matrix)
-
-    def find_similar_layers_lis_style(self, similarities: np.ndarray) -> List[int]:
-        """
-        Find layers to keep using LIS-style approach
-        Keep layers that form an increasing sequence of dissimilarity
-        """
-        n = len(similarities)
-        if n <= 1:
-            return list(range(n))
-
-        # Convert similarity to dissimilarity
-        dissimilarities = 1 - similarities
-
-        # Find longest increasing subsequence of dissimilar layers
-        dp = [1] * n  # dp[i] = length of LIS ending at i
-        parent = [-1] * n
-
-        for i in range(1, n):
-            for j in range(i):
-                # If layer i is sufficiently different from layer j
-                avg_dissim = np.mean(dissimilarities[i, :j + 1])
-                if avg_dissim > (1 - self.distance_threshold) and dp[j] + 1 > dp[i]:
-                    dp[i] = dp[j] + 1
-                    parent[i] = j
-
-        # Reconstruct the sequence
-        max_length_idx = np.argmax(dp)
-        selected_layers = []
-        current = max_length_idx
-
-        while current != -1:
-            selected_layers.append(current)
-            current = parent[current]
-
-        return selected_layers[::-1]  # Reverse to get correct order
-
-    def filter_similar_layers(self, layer_weights: List[torch.Tensor]) -> List[int]:
-        """Filter out similar layers, keeping only diverse ones"""
-        if len(layer_weights) <= 1:
-            return list(range(len(layer_weights)))
-
-        # Compute features for each layer
-        layer_features = [self.compute_layer_features(w) for w in layer_weights]
-
-        # Compute similarity matrix
-        similarity_matrix = self.compute_similarity_matrix(layer_features)
-
-        # Find layers to keep using LIS-style approach
-        selected_indices = self.find_similar_layers_lis_style(similarity_matrix)
-
-        return selected_indices
-
-
-class AdvancedL1Pruner:
-    """Advanced pruner combining APB algorithm with L1,∞,∞ norm and layer filtering"""
-
-    def __init__(self, pruning_type="unstructured"):
-        self.pruning_type = pruning_type
-        self.apb_optimizer = APBOptimizer()
-        self.layer_filter = LayerDistanceCalculator()
-        self.l1_infty_norm = L1InftyInftyNorm()
-
-    def extract_layer_weights(self, model) -> List[torch.Tensor]:
-        """Extract weights from prunable layers"""
-        convs = model.get_prunable_layers(pruning_type=self.pruning_type)
-        return [conv.conv.weight for conv in convs]
-
-    def apb_prune(self, model, prune_rate: float):
-        """Apply APB pruning algorithm"""
-        convs = model.get_prunable_layers(pruning_type=self.pruning_type)
-        device = next(model.parameters()).device
-
-        # Collect all weights and compute global statistics
-        all_weights = []
-        all_importance = []
-
-        for conv in convs:
-            weight = conv.conv.weight
-            importance = self.apb_optimizer.compute_importance_score(weight)
-            all_weights.append(weight)
-            all_importance.append(importance)
-
-        # Compute global threshold for pruning
-        all_importance_flat = torch.cat([imp.flatten() for imp in all_importance])
-        global_threshold = torch.quantile(all_importance_flat, prune_rate / 100.0)
-
-        # Apply APB to each layer
-        for i, conv in enumerate(convs):
-            weight = all_weights[i]
-            importance = all_importance[i]
-
-            # Create mask for weights below threshold
-            prune_mask = importance < global_threshold
-
-            # Select full-precision weights from remaining weights
-            remaining_importance = importance * (~prune_mask).float()
-            fp_mask = self.apb_optimizer.select_full_precision_weights(
-                weight, remaining_importance
-            )
-
-            # Apply APB binarization
-            processed_weight = self.apb_optimizer.binarize_weights(weight, fp_mask)
-
-            # Apply pruning mask
-            processed_weight = processed_weight * (~prune_mask).float()
-
-            # Update layer weights
-            conv.conv.weight.data = processed_weight
-
-    def filter_layers_by_l1_infty_distance(self, model) -> List[int]:
-        """Filter layers based on L1,∞,∞ norm distances"""
-        layer_weights = self.extract_layer_weights(model)
-        return self.layer_filter.filter_similar_layers(layer_weights)
-
-    def apply_layer_filtering(self, model, selected_layer_indices: List[int]):
-        """Apply layer filtering by zeroing out unselected layers"""
-        convs = model.get_prunable_layers(pruning_type=self.pruning_type)
-
-        for i, conv in enumerate(convs):
-            if i not in selected_layer_indices:
-                # Zero out this layer's weights
-                conv.conv.weight.data.zero_()
-                if hasattr(conv.conv, 'bias') and conv.conv.bias is not None:
-                    conv.conv.bias.data.zero_()
-
-    def compute_l1_infty_norm_statistics(self, model) -> Dict:
-        """Compute L1,∞,∞ norm statistics for the model"""
-        layer_weights = self.extract_layer_weights(model)
-        layer_norms = []
-
-        for weight in layer_weights:
-            weight_np = weight.detach().cpu().numpy()
-            norm_value = self.l1_infty_norm.norm(weight_np)
-            layer_norms.append(norm_value)
+        binary_count = int(binarize_mask.sum().item())
+        fp_count = int((~binarize_mask).sum().item())
+        total_count = weight.numel()
 
         return {
-            'layer_norms': layer_norms,
-            'total_norm': sum(layer_norms),
-            'mean_norm': np.mean(layer_norms),
-            'std_norm': np.std(layer_norms),
-            'max_norm': max(layer_norms),
-            'min_norm': min(layer_norms)
+            "alpha": alpha,
+            "delta": delta,
+            "threshold": threshold,
+            "binary_ratio": binary_count / total_count if total_count > 0 else 0.0,
+            "fp_ratio": fp_count / total_count if total_count > 0 else 0.0,
+            "binary_count": binary_count,
+            "fp_count": fp_count,
         }
 
-    def prune_and_optimize_pipeline(self, model, prune_rate: float,
-                                    apply_layer_filtering: bool = True) -> Dict:
-        """Complete pipeline: APB pruning -> layer filtering -> activation -> fine-tune ready"""
+    def update_layer_parameters(self, layer_id: int, new_alpha: float = None, new_delta: float = None):
+        if new_alpha is not None:
+            self.layer_alphas[layer_id] = new_alpha
+        if new_delta is not None:
+            self.layer_deltas[layer_id] = new_delta
 
-        print(f"Starting advanced pruning pipeline with {prune_rate}% pruning rate...")
+    # Legacy support
+    def compute_importance_score(self, weight: torch.Tensor) -> torch.Tensor:
+        return torch.abs(weight)
 
-        # Step 1: Apply APB pruning algorithm
-        print("Step 1: Applying APB pruning...")
-        self.apb_prune(model, prune_rate)
+    def binarize_weights(self, weight: torch.Tensor, fp_mask: torch.Tensor) -> torch.Tensor:
+        binary_part = torch.sign(weight) * (1 - fp_mask.float())
+        fp_part = weight * fp_mask.float()
+        return binary_part + fp_part
 
-        # Compute statistics after pruning
-        post_prune_stats = self.compute_l1_infty_norm_statistics(model)
-        print(f"Post-pruning L1,∞,∞ norm statistics: {post_prune_stats}")
 
-        # Step 2: Filter layers using L1,∞,∞ distance metric
+class LayerSimilarityFilter:
+    """Lọc layers tương tự dựa trên L1,∞,∞ norm"""
+
+    def __init__(self, similarity_threshold: float = 0.85):
+        self.similarity_threshold = similarity_threshold
+        self.l1_infty_norm = L1InftyInftyNorm()
+
+    def extract_layer_features(self, weight: torch.Tensor) -> np.ndarray:
+        weight_np = weight.detach().cpu().numpy()
+        flat_weight = weight_np.flatten()
+        features = [
+            np.mean(np.abs(flat_weight)),
+            np.std(flat_weight),
+            np.percentile(np.abs(flat_weight), 90),
+            np.percentile(np.abs(flat_weight), 95),
+            self.l1_infty_norm.norm(weight_np),
+            np.max(np.abs(flat_weight)),
+            np.count_nonzero(flat_weight) / len(flat_weight) if len(flat_weight) > 0 else 0.0
+        ]
+        return np.array(features)
+
+    def compute_layer_similarities(self, layer_weights: List[torch.Tensor]) -> np.ndarray:
+        n_layers = len(layer_weights)
+        if n_layers <= 1:
+            return np.array([[1.0]])
+        features_list = [self.extract_layer_features(w) for w in layer_weights]
+        feature_matrix = np.stack(features_list)
+        similarity_matrix = cosine_similarity(feature_matrix)
+        return similarity_matrix
+
+    def select_diverse_layers(self, layer_weights: List[torch.Tensor]) -> List[int]:
+        n_layers = len(layer_weights)
+        if n_layers <= 1:
+            return list(range(n_layers))
+
+        similarity_matrix = self.compute_layer_similarities(layer_weights)
         selected_layers = []
-        if apply_layer_filtering:
-            print("Step 2: Filtering similar layers using L1,∞,∞ distance...")
-            selected_layers = self.filter_layers_by_l1_infty_distance(model)
-            print(f"Selected {len(selected_layers)} layers out of {len(self.extract_layer_weights(model))}")
+        remaining_layers = list(range(n_layers))
 
-            # Apply layer filtering
-            self.apply_layer_filtering(model, selected_layers)
+        layer_norms = [self.l1_infty_norm.norm(w.detach().cpu().numpy()) for w in layer_weights]
+        first_layer = int(np.argmax(layer_norms))
+        selected_layers.append(first_layer)
+        remaining_layers.remove(first_layer)
 
-        # Step 3: Prepare for activation and fine-tuning
-        print("Step 3: Model ready for activation and fine-tuning...")
+        while remaining_layers:
+            best_layer = None
+            min_max_similarity = float('inf')
 
-        # Compute final statistics
-        final_stats = self.compute_l1_infty_norm_statistics(model)
+            for candidate in remaining_layers:
+                max_similarity = 0.0
+                for selected in selected_layers:
+                    max_similarity = max(max_similarity, float(similarity_matrix[candidate, selected]))
+                if max_similarity < min_max_similarity:
+                    min_max_similarity = max_similarity
+                    best_layer = candidate
 
-        # Calculate sparsity
-        total_params = sum(p.numel() for p in model.parameters())
-        zero_params = sum((p == 0).sum().item() for p in model.parameters())
-        sparsity = zero_params / total_params
+            if min_max_similarity > self.similarity_threshold:
+                break
+
+            if best_layer is not None:
+                selected_layers.append(best_layer)
+                remaining_layers.remove(best_layer)
+
+        return sorted(selected_layers)
+
+
+class TensorToFineTuneReady:
+    """
+    Pipeline: Tensor → APB → L1,∞,∞ Layer Filtering → Fine-tune Ready Model
+    """
+
+    def __init__(self, pruning_type: str = "unstructured", init_alpha: Optional[float] = None,
+                 init_delta: Optional[float] = None, similarity_threshold: float = 0.85):
+        # Lưu pruning_type (để gọi get_prunable_layers(pruning_type=...))
+        self.pruning_type = pruning_type
+        self.apb_processor = APBProcessor(init_alpha=init_alpha, init_delta=init_delta)
+        self.layer_filter = LayerSimilarityFilter(similarity_threshold=similarity_threshold)
+        self.l1_infty_norm = L1InftyInftyNorm()
+
+    def process_model(self, model, prune_rate: float = 50.0) -> Dict:
+        print(f"🚀 Starting pipeline (pruning_type={self.pruning_type}) prune_rate={prune_rate}%")
+        apb_stats = self._apply_apb_to_all_layers(model)
+        filtering_stats = self._filter_similar_layers(model)
+        final_stats = self._compute_final_statistics(model)
 
         results = {
-            'selected_layers': selected_layers,
-            'post_prune_stats': post_prune_stats,
+            'apb_stats': apb_stats,
+            'filtering_stats': filtering_stats,
             'final_stats': final_stats,
-            'sparsity': sparsity,
-            'total_params': total_params,
-            'zero_params': zero_params
+            'pipeline_success': True
         }
-
-        print(f"Pipeline completed. Final sparsity: {sparsity:.2%}")
         return results
 
-    def prune_and_optimize(self, model, prune_rate: float, test_data=None):
-        """Compatibility method with old interface"""
-        return self.prune_and_optimize_pipeline(model, prune_rate, apply_layer_filtering=True)
+    def _apply_apb_to_all_layers(self, model) -> Dict:
+        convs = model.get_prunable_layers(pruning_type=self.pruning_type)
+        n = len(convs)
+        print(f"   Found {n} prunable layers")
 
-    def prune(self, model, prune_rate: float):
-        """Main pruning interface"""
-        return self.prune_and_optimize_pipeline(model, prune_rate)
+        processed_layers = 0
+        total_original_params = 0
+        total_remaining_params = 0
+
+        for i, conv in enumerate(convs):
+            weight = conv.conv.weight
+            total_original_params += weight.numel()
+
+            processed_weight = self.apb_processor.apply_apb_to_layer(weight, i)
+            conv.conv.weight.data = processed_weight
+
+            remaining_params = int(torch.count_nonzero(processed_weight).item())
+            total_remaining_params += remaining_params
+
+            processed_layers += 1
+            if (i + 1) % 10 == 0 or (i + 1) == n:
+                print(f"   Processed {i + 1}/{n} layers...")
+
+        apb_sparsity = 0.0
+        if total_original_params > 0:
+            apb_sparsity = 1.0 - (total_remaining_params / total_original_params)
+
+        stats = {
+            'processed_layers': processed_layers,
+            'original_params': total_original_params,
+            'remaining_params': total_remaining_params,
+            'apb_sparsity': apb_sparsity
+        }
+        print(f"   ✅ APB completed: {apb_sparsity:.2%} sparsity achieved")
+        return stats
+
+    def _filter_similar_layers(self, model) -> Dict:
+        convs = model.get_prunable_layers(pruning_type=self.pruning_type)
+        layer_weights = [conv.conv.weight for conv in convs]
+        original_layer_count = len(layer_weights)
+        print(f"   Analyzing {original_layer_count} layers for similarity...")
+
+        selected_layer_indices = self.layer_filter.select_diverse_layers(layer_weights)
+        layers_to_remove = [i for i in range(original_layer_count) if i not in selected_layer_indices]
+
+        print(f"   Selected {len(selected_layer_indices)} diverse layers")
+        print(f"   Removing {len(layers_to_remove)} similar layers")
+
+        for remove_idx in layers_to_remove:
+            conv = convs[remove_idx]
+            conv.conv.weight.data.zero_()
+            if hasattr(conv.conv, 'bias') and conv.conv.bias is not None:
+                conv.conv.bias.data.zero_()
+
+        remaining_norms = []
+        for idx in selected_layer_indices:
+            weight = layer_weights[idx]
+            weight_np = weight.detach().cpu().numpy()
+            norm_val = self.l1_infty_norm.norm(weight_np)
+            remaining_norms.append(norm_val)
+
+        layer_reduction_ratio = 0.0
+        if original_layer_count > 0:
+            layer_reduction_ratio = len(layers_to_remove) / original_layer_count
+
+        stats = {
+            'original_layers': original_layer_count,
+            'remaining_layers': len(selected_layer_indices),
+            'removed_layers': len(layers_to_remove),
+            'selected_indices': selected_layer_indices,
+            'removed_indices': layers_to_remove,
+            'layer_reduction_ratio': layer_reduction_ratio,
+            'remaining_layer_norms': remaining_norms,
+            'avg_remaining_norm': float(np.mean(remaining_norms)) if remaining_norms else 0.0
+        }
+        print(f"   ✅ Layer filtering completed: {stats['layer_reduction_ratio']:.2%} layers removed")
+        return stats
+
+    def _compute_final_statistics(self, model) -> Dict:
+        total_params = sum(p.numel() for p in model.parameters())
+        zero_params = sum(int((p == 0).sum().item()) for p in model.parameters())
+        active_params = total_params - zero_params
+        sparsity = (zero_params / total_params) if total_params > 0 else 0.0
+
+        convs = model.get_prunable_layers(pruning_type=self.pruning_type)
+        active_layers = 0
+        layer_norms = []
+        for conv in convs:
+            weight = conv.conv.weight
+            if int(torch.count_nonzero(weight).item()) > 0:
+                active_layers += 1
+                weight_np = weight.detach().cpu().numpy()
+                layer_norms.append(self.l1_infty_norm.norm(weight_np))
+
+        stats = {
+            'total_params': total_params,
+            'active_params': active_params,
+            'zero_params': zero_params,
+            'sparsity': sparsity,
+            'active_layers': active_layers,
+            'total_layers': len(convs),
+            'layer_norms': layer_norms,
+            'total_l1_infty_norm': float(sum(layer_norms)),
+            'avg_layer_norm': float(np.mean(layer_norms)) if layer_norms else 0.0,
+            'model_ready_for_finetuning': True
+        }
+        return stats
+
+    # compatibility: some callers expect prune_and_optimize
+    def prune_and_optimize(self, model, prune_rate: float = 50.0):
+        return self.process_model(model, prune_rate)
+
+    def quick_process(self, model, prune_rate: float = 50.0):
+        results = self.process_model(model, prune_rate)
+        return model, results
