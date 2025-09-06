@@ -121,14 +121,30 @@ for epoch in range(sd["epoch"]):
 for group in optimizer.param_groups:
     group["lr"] = scheduler.get_lr()[0]
 
-
 ################################################################## ACTUAL PRUNING/FINETUNING
 
 
 prune_rates = np.linspace(0, args.target_prune_rate, args.prune_iters)
 
 for prune_rate in tqdm(prune_rates):
-    pruner.prune_and_optimize(model, prune_rate)
+    # Check if the pruner has the new advanced method
+    if hasattr(pruner, 'prune_and_optimize_pipeline'):
+        # Use new APB + L1,∞,∞ pipeline
+        pruning_results = pruner.prune_and_optimize_pipeline(
+            model,
+            prune_rate,
+            apply_layer_filtering=True
+        )
+
+        # Print additional info from advanced pipeline
+        if 'sparsity' in pruning_results:
+            print(f"[APB] Pipeline sparsity: {pruning_results['sparsity']:.2%}")
+        if 'selected_layers' in pruning_results and pruning_results['selected_layers']:
+            print(f"[L1,∞,∞] Selected layers: {len(pruning_results['selected_layers'])}")
+
+    else:
+        # Use original method for backward compatibility
+        pruner.prune_and_optimize(model, prune_rate)
 
     # Đếm số tham số còn lại sau khi prune
     total_params = sum(p.numel() for p in model.parameters())
@@ -136,7 +152,8 @@ for prune_rate in tqdm(prune_rates):
     sparsity = 100.0 * (1 - nonzero_params / total_params)
 
     print(f"\n[INFO] Prune rate: {prune_rate:.2f}%")
-    print(f"[INFO] Remaining params: {nonzero_params}/{total_params} ({100-sparsity:.2f}% kept, {sparsity:.2f}% pruned)")
+    print(
+        f"[INFO] Remaining params: {nonzero_params}/{total_params} ({100 - sparsity:.2f}% kept, {sparsity:.2f}% pruned)")
 
     if prune_rate % args.save_every == 0:
         checkpoint = args.prune_checkpoint + str(prune_rate)
