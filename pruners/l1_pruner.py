@@ -104,82 +104,49 @@ class APBProcessor:
 
 
 class LayerSimilarityFilter:
-    """Lọc layers tương tự dựa trên L1,∞,∞ norm"""
+    """Lọc layers dựa trên khoảng cách D cố định từ chuẩn L1,∞,∞"""
 
-    def __init__(self, similarity_threshold: float = 0.85):
-        self.similarity_threshold = similarity_threshold
+    def __init__(self, min_distance: float = 0.5):
+        self.min_distance = min_distance
         self.l1_infty_norm = L1InftyInftyNorm()
 
-    def extract_layer_features(self, weight: torch.Tensor) -> np.ndarray:
-        weight_np = weight.detach().cpu().numpy()
-        flat_weight = weight_np.flatten()
-        features = [
-            np.mean(np.abs(flat_weight)),
-            np.std(flat_weight),
-            np.percentile(np.abs(flat_weight), 90),
-            np.percentile(np.abs(flat_weight), 95),
-            self.l1_infty_norm.norm(weight_np),
-            np.max(np.abs(flat_weight)),
-            np.count_nonzero(flat_weight) / len(flat_weight) if len(flat_weight) > 0 else 0.0
-        ]
-        return np.array(features)
-
-    def compute_layer_similarities(self, layer_weights: List[torch.Tensor]) -> np.ndarray:
-        n_layers = len(layer_weights)
-        if n_layers <= 1:
-            return np.array([[1.0]])
-        features_list = [self.extract_layer_features(w) for w in layer_weights]
-        feature_matrix = np.stack(features_list)
-        similarity_matrix = cosine_similarity(feature_matrix)
-        return similarity_matrix
+    def compute_distance(self, w1: torch.Tensor, w2: torch.Tensor) -> float:
+        n1 = self.l1_infty_norm.norm(w1.detach().cpu().numpy())
+        n2 = self.l1_infty_norm.norm(w2.detach().cpu().numpy())
+        return abs(n1 - n2)  # khoảng cách tuyệt đối
 
     def select_diverse_layers(self, layer_weights: List[torch.Tensor]) -> List[int]:
         n_layers = len(layer_weights)
         if n_layers <= 1:
             return list(range(n_layers))
 
-        similarity_matrix = self.compute_layer_similarities(layer_weights)
-        selected_layers = []
-        remaining_layers = list(range(n_layers))
-
-        layer_norms = [self.l1_infty_norm.norm(w.detach().cpu().numpy()) for w in layer_weights]
-        first_layer = int(np.argmax(layer_norms))
-        selected_layers.append(first_layer)
-        remaining_layers.remove(first_layer)
+        selected_layers = [0]  # chọn layer đầu tiên mặc định
+        remaining_layers = list(range(1, n_layers))
 
         while remaining_layers:
-            best_layer = None
-            min_max_similarity = float('inf')
-
-            for candidate in remaining_layers:
-                max_similarity = 0.0
-                for selected in selected_layers:
-                    max_similarity = max(max_similarity, float(similarity_matrix[candidate, selected]))
-                if max_similarity < min_max_similarity:
-                    min_max_similarity = max_similarity
-                    best_layer = candidate
-
-            if min_max_similarity > self.similarity_threshold:
-                break
-
-            if best_layer is not None:
-                selected_layers.append(best_layer)
-                remaining_layers.remove(best_layer)
+            candidate = remaining_layers.pop(0)
+            is_similar = False
+            for selected in selected_layers:
+                dist = self.compute_distance(layer_weights[candidate], layer_weights[selected])
+                if dist <= self.min_distance:
+                    is_similar = True
+                    break
+            if not is_similar:
+                selected_layers.append(candidate)
 
         return sorted(selected_layers)
 
 
 class TensorToFineTuneReady:
     """
-    Pipeline: Tensor → APB → L1,∞,∞ Layer Filtering → Fine-tune Ready Model
+    Pipeline: Tensor → APB → L1,∞,∞ Distance Filtering → Fine-tune Ready Model
     """
 
     def __init__(self, pruning_type: str = "unstructured", init_alpha: Optional[float] = None,
-                 init_delta: Optional[float] = None, similarity_threshold: float = 0.85):
-        # Lưu pruning_type (để gọi get_prunable_layers(pruning_type=...))
+                 init_delta: Optional[float] = None, min_distance: float = 0.5):
         self.pruning_type = pruning_type
         self.apb_processor = APBProcessor(init_alpha=init_alpha, init_delta=init_delta)
-        self.layer_filter = LayerSimilarityFilter(similarity_threshold=similarity_threshold)
+        self.layer_filter = LayerSimilarityFilter(min_distance=min_distance)
         self.l1_infty_norm = L1InftyInftyNorm()
 
     def process_model(self, model, prune_rate: float = 50.0) -> Dict:
@@ -236,7 +203,7 @@ class TensorToFineTuneReady:
         convs = model.get_prunable_layers(pruning_type=self.pruning_type)
         layer_weights = [conv.conv.weight for conv in convs]
         original_layer_count = len(layer_weights)
-        print(f"   Analyzing {original_layer_count} layers for similarity...")
+        print(f"   Analyzing {original_layer_count} layers for distance filtering...")
 
         selected_layer_indices = self.layer_filter.select_diverse_layers(layer_weights)
         layers_to_remove = [i for i in range(original_layer_count) if i not in selected_layer_indices]
@@ -271,7 +238,7 @@ class TensorToFineTuneReady:
             'remaining_layer_norms': remaining_norms,
             'avg_remaining_norm': float(np.mean(remaining_norms)) if remaining_norms else 0.0
         }
-        print(f"   ✅ Layer filtering completed: {stats['layer_reduction_ratio']:.2%} layers removed")
+        print(f"   ✅ Distance-based layer filtering completed: {stats['layer_reduction_ratio']:.2%} layers removed")
         return stats
 
     def _compute_final_statistics(self, model) -> Dict:
@@ -304,7 +271,7 @@ class TensorToFineTuneReady:
         }
         return stats
 
-    # compatibility: some callers expect prune_and_optimize
+    # compatibility
     def prune_and_optimize(self, model, prune_rate: float = 50.0):
         return self.process_model(model, prune_rate)
 

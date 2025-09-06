@@ -49,7 +49,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--prune_iters",
-    default=10,
+    default=100,
     help="how many times to repeat the prune->finetune process",
 )
 parser.add_argument(
