@@ -106,7 +106,7 @@ class APBProcessor:
 class LayerSimilarityFilter:
     """Lọc layers dựa trên khoảng cách D cố định từ chuẩn L1,∞,∞"""
 
-    def __init__(self, min_distance: float = 0.5):
+    def __init__(self, min_distance: float = 0.05):
         self.min_distance = min_distance
         self.l1_infty_norm = L1InftyInftyNorm()
 
