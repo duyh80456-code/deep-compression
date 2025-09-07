@@ -47,7 +47,7 @@ class AverageMeter(object):
 
 
 def get_cifar_loaders(
-    data_loc="./disk/scratch/datasets/cifar10/",
+    data_loc="./disk/scratch/datasets/cifar100/",
     batch_size=128,
     cutout=True,
     n_holes=1,
@@ -71,14 +71,14 @@ def get_cifar_loaders(
         ]
     )
 
-    trainset = torchvision.datasets.CIFAR10(
+    trainset = torchvision.datasets.CIFAR100(
         root=data_loc, train=True, download=True, transform=transform_train
     )
     trainloader = torch.utils.data.DataLoader(
         trainset, batch_size=batch_size, shuffle=True, num_workers=2
     )
 
-    testset = torchvision.datasets.CIFAR10(
+    testset = torchvision.datasets.CIFAR100(
         root=data_loc, train=False, download=True, transform=transform_test
     )
     testloader = torch.utils.data.DataLoader(

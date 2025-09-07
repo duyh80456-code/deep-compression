@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 ################################################################# ARGUMENT PARSING
 
-parser = argparse.ArgumentParser(description="PyTorch CIFAR10 Training")
+parser = argparse.ArgumentParser(description="PyTorch CIFAR100 Training")
 parser.add_argument(
     "--model", default="resnet18", help="resnet9/18/34/50, wrn_40_2/_16_2/_40_1"
 )

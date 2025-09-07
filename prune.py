@@ -17,8 +17,9 @@ from pruners.l1_pruner import TensorToFineTuneReady
 
 ################################################################## ARGUMENT PARSING
 
-parser = argparse.ArgumentParser(description="PyTorch CIFAR10 full pipeline pruning")
-parser.add_argument("--model", default="resnet18", help="resnet9, resnet18, resnet34, resnet50, wrn_40_2, wrn_16_2, wrn_40_1")
+parser = argparse.ArgumentParser(description="PyTorch CIFAR100 full pipeline pruning")
+parser.add_argument("--model", default="resnet18",
+                    help="resnet9, resnet18, resnet34, resnet50, wrn_40_2, wrn_16_2, wrn_40_1")
 parser.add_argument("--data_loc", default="./data", type=str)
 parser.add_argument("--checkpoint", default=None, type=str, help="Pretrained model to start from")
 parser.add_argument("--prune_checkpoint", default=None, type=str, help="Where to save pruned models")
@@ -28,7 +29,7 @@ parser.add_argument("--cutout", action="store_true")
 
 parser.add_argument("--pruning_type", default="unstructured", type=str)
 parser.add_argument("--prune_iters", default=100, type=int)
-parser.add_argument("--target_prune_rate", default=99, type=int)
+parser.add_argument("--target_prune_rate", default=75, type=int)
 parser.add_argument("--finetune_steps", default=100)
 parser.add_argument("--lr", default=0.001)
 parser.add_argument("--weight_decay", default=0.0005, type=float)
@@ -78,7 +79,9 @@ pruner = TensorToFineTuneReady(
 
 ################################################################## TRAINING HYPERPARAMETERS
 
+num_classes = 100
 trainloader, testloader = get_cifar_loaders(args.data_loc, cutout=args.cutout)
+
 optimizer = optim.SGD([w for name, w in model.named_parameters() if not "mask" in name],
                       lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
 criterion = nn.CrossEntropyLoss()
@@ -115,7 +118,7 @@ for prune_rate in tqdm(prune_rates):
     sparsity = 100.0 * (1 - nonzero_params / total_params)
     print(f"[INFO] Remaining params: {nonzero_params}/{total_params} ({100 - sparsity:.2f}% kept, {sparsity:.2f}% pruned)")
 
-    # Finetune và lưu checkpoint
+    # Fine-tune nhanh sau mỗi bước prune
     checkpoint = args.prune_checkpoint + f"{prune_rate:.2f}"
     finetune(model, trainloader, criterion, optimizer, args.finetune_steps)
     acc = validate(model, prune_rate, testloader, criterion=criterion, checkpoint=checkpoint)

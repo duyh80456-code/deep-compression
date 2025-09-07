@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import torch.optim as optim
 from typing import List, Dict, Optional
 from sklearn.metrics.pairwise import cosine_similarity
 import copy
@@ -20,7 +21,7 @@ class L1InftyInftyNorm:
 class APBProcessor:
     """Automatic Prune Binarization (APB) processor with optional α, δ parameters"""
 
-    def __init__(self, init_alpha=None, init_delta=None, binary_threshold: float = 0.1, fp_ratio: float = 0.05):
+    def __init__(self, init_alpha=None, init_delta=None, binary_threshold: float = 0.5, fp_ratio: float = 0.05):
         """
         init_alpha/init_delta: nếu là số thì dùng trực tiếp, nếu None thì auto theo weight.
         binary_threshold: fallback threshold khi alpha/delta không khả dụng.
@@ -278,3 +279,77 @@ class TensorToFineTuneReady:
     def quick_process(self, model, prune_rate: float = 50.0):
         results = self.process_model(model, prune_rate)
         return model, results
+
+def fine_tune_model(model, trainloader, testloader, epochs=50, lr=1e-3, device="cuda",
+                    save_path: Optional[str] = None, resume: bool = False):
+    """
+    Fine-tune model sau pruning.
+    Args:
+        model: PyTorch model đã prune.
+        trainloader, testloader: dataloader train/val.
+        epochs: số epoch fine-tune.
+        lr: learning rate nhỏ để hồi phục accuracy.
+        device: "cuda" hoặc "cpu".
+        save_path: nơi lưu checkpoint (nếu muốn).
+        resume: True nếu muốn load từ checkpoint để train tiếp.
+    """
+    model = model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    start_epoch = 0
+    if resume and save_path is not None:
+        checkpoint = torch.load(save_path, map_location=device)
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
+        start_epoch = checkpoint["epoch"] + 1
+        print(f"🔄 Resumed fine-tuning from epoch {start_epoch}")
+
+    for epoch in range(start_epoch, epochs):
+        # --- Train ---
+        model.train()
+        correct, total, train_loss = 0, 0, 0.0
+        for inputs, targets in trainloader:
+            inputs, targets = inputs.to(device), targets.to(device)
+
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+
+        train_acc = 100. * correct / total
+        scheduler.step()
+
+        # --- Validate ---
+        model.eval()
+        correct, total = 0, 0
+        with torch.no_grad():
+            for inputs, targets in testloader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = model(inputs)
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+        test_acc = 100. * correct / total
+
+        print(f"[Fine-tune] Epoch {epoch+1}/{epochs} "
+              f"| Train Acc: {train_acc:.2f}% | Test Acc: {test_acc:.2f}%")
+
+        # --- Save checkpoint ---
+        if save_path is not None:
+            torch.save({
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+            }, save_path)
+
+    return model

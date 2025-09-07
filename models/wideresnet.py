@@ -91,7 +91,7 @@ class BasicBlock(nn.Module):
 
 
 class WideResNet(nn.Module):
-    def __init__(self, depth, widen_factor, num_classes=10, mode="train"):
+    def __init__(self, depth, widen_factor, num_classes=100, mode="train"):
         super(WideResNet, self).__init__()
         self.in_planes = 64
         self.mode = mode
