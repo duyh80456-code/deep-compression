@@ -13,7 +13,7 @@ from utils import *
 from tqdm import tqdm
 
 # Import pipeline full từ file thuật toán
-from l1_pruner import TensorToFineTuneReady  # đổi tên file cho đúng
+from pruners.l1_pruner import TensorToFineTuneReady
 
 ################################################################## ARGUMENT PARSING
 
